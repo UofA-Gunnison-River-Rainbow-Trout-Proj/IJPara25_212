@@ -1,0 +1,386 @@
+module load StdEnv/2020
+module load fastp/0.23.4
+
+## Determining sequence file readlength [optional]: random test
+
+awk 'NR%4 == 2 {lengths[length($0)]++} END {for (l in lengths) {print l, lengths[l]}}' file.fastq
+
+## FastP: QC with Trimming
+
+files=( $(ls *.fastq) )
+for (( i=0; i<${#files[@]} ; i+=2 )) ; do
+fastp -y -5 -3 -e 20 -q 20 --cut_front_mean_quality 30 --cut_tail_mean_quality 30 -i "${files[i]}" -I "${files[i+1]}" -o "${files[i]%_1.fastq}_trimmed_R1.fastq" -O  "${files[i]%_1.fastq}_trimmed_R2.fastq" -h  "${files[i]%_1.fastq}_fastp_report.html" 
+done
+
+## STAR: Genome Indexing
+
+cd 02_trimmed
+
+module load StdEnv/2023
+module load star/2.7.11a
+
+STAR --runThreadN 60 \
+--runMode genomeGenerate \
+--genomeDir /home/renaldja/scratch/abdullah/ref \
+--genomeFastaFiles /home/renaldja/scratch/abdullah/ref/Oncorhynchus_mykiss.USDA_OmykA_1.1.dna.toplevel.fa \
+--sjdbGTFfile /home/renaldja/scratch/abdullah/ref/Oncorhynchus_mykiss.USDA_OmykA_1.1.111.gtf \
+--sjdbOverhang 149
+
+## STAR: Alignment
+
+files=( $(ls *.fastq) )
+for (( i=0; i<${#files[@]} ; i+=2 )) ; do
+STAR --genomeDir /home/renaldja/scratch/abdullah/ref --readFilesIn "${files[i]}" "${files[i+1]}" --sjdbScore 2 --outFileNamePrefix "${files[i]%_trimmed_R1.fastq}" --runThreadN 60 --outSAMtype BAM SortedByCoordinate
+done
+
+
+## RSeQC: See if stranded or not
+
+module load StdEnv/2020 
+module load gcc/9.3.0
+module load kentutils/453 
+
+gtfToGenePred /home/renaldja/scratch/abdullah/ref/Oncorhynchus_mykiss.USDA_OmykA_1.1.111.gtf /home/renaldja/scratch/abdullah/ref/Oncorhynchus_mykiss.USDA_OmykA_1.1.111.genepred
+genePredToBed /home/renaldja/scratch/abdullah/ref/Oncorhynchus_mykiss.USDA_OmykA_1.1.111.genepred /home/renaldja/scratch/abdullah/ref/Oncorhynchus_mykiss.USDA_OmykA_1.1.111.bed12
+
+arr=( $(ls *bam) )
+for i in ${arr[@]};do
+infer_experiment.py -i $i -r /home/renaldja/scratch/abdullah/ref/Oncorhynchus_mykiss.USDA_OmykA_1.1.111.bed12 >  "${i%.bam}_rseqc"
+done
+
+cat *_rseqc > all_rseqc
+#### based from the results the reads are unstranded paired-end
+
+
+## FeatureCounts
+
+module load StdEnv/2020
+module load subread/2.0.1 
+
+featureCounts -p -B -M --fraction -s 2 -a /home/renaldja/scratch/abdullah/ref/Oncorhynchus_mykiss.USDA_OmykA_1.1.111.gtf -o all_featurecounts.txt T0-C1.bam T0-C2.bam T0-C3.bam T0-C4.bam T0-C5.bam T0-E1.bam T0-E2.bam T0-E3.bam T0-E4.bam T0-E5.bam T1d-C10.bam T1d-C1.bam T1d-C2.bam T1d-C3.bam T1d-C4.bam T1d-C5.bam T1d-C6.bam T1d-C7.bam T1d-C8.bam T1d-C9.bam T1d-E10.bam T1d-E11.bam T1d-E12.bam T1d-E13.bam T1d-E14.bam T1d-E15.bam T1d-E16.bam T1d-E17.bam T1d-E18.bam T1d-E19.bam T1d-E1.bam T1d-E20.bam T1d-E2.bam T1d-E3.bam T1d-E4.bam T1d-E5.bam T1d-E6.bam T1d-E7.bam T1d-E8.bam T1d-E9.bam T1h-C1.bam T1h-C2.bam T1h-C3.bam T1h-C4.bam T1h-C5.bam T1h-E1.bam T1h-E2.bam T1h-E3.bam T1h-E4.bam T1h-E5.bam T24d-C10.bam T24d-C1.bam T24d-C2.bam T24d-C3.bam T24d-C4.bam T24d-C5.bam T24d-C6.bam T24d-C7.bam T24d-C8.bam T24d-C9.bam T24d-E10.bam T24d-E11.bam T24d-E12.bam T24d-E13.bam T24d-E14.bam T24d-E15.bam T24d-E16.bam T24d-E17.bam T24d-E18.bam T24d-E19.bam T24d-E1.bam T24d-E20.bam T24d-E2.bam T24d-E3.bam T24d-E4.bam T24d-E5.bam T24d-E6.bam T24d-E7.bam T24d-E8.bam T24d-E9.bam T2d-C10.bam T2d-C1.bam T2d-C2.bam T2d-C3.bam T2d-C4.bam T2d-C5.bam T2d-C6.bam T2d-C7.bam T2d-C8.bam T2d-C9.bam T2d-E10.bam T2d-E11.bam T2d-E12.bam T2d-E13.bam T2d-E14.bam T2d-E15.bam T2d-E16.bam T2d-E17.bam T2d-E18.bam T2d-E19.bam T2d-E1.bam T2d-E20.bam T2d-E2.bam T2d-E3.bam T2d-E4.bam T2d-E5.bam T2d-E6.bam T2d-E7.bam T2d-E8.bam T2d-E9.bam T4d-C10.bam T4d-C1.bam T4d-C2.bam T4d-C3.bam T4d-C4.bam T4d-C5.bam T4d-C6.bam T4d-C7.bam T4d-C8.bam T4d-C9.bam T4d-E10.bam T4d-E11.bam T4d-E12.bam T4d-E13.bam T4d-E14.bam T4d-E15.bam T4d-E16.bam T4d-E17.bam T4d-E18.bam T4d-E19.bam T4d-E1.bam T4d-E20.bam T4d-E2.bam T4d-E3.bam T4d-E4.bam T4d-E5.bam T4d-E6.bam T4d-E7.bam T4d-E8.bam T4d-E9.bam
+
+## Generate MultiQC report
+
+pip install multiqc
+
+multiqc .
+
+##############################################################
+########       R environment for lines below       ###########
+##############################################################
+
+setwd(srcDir)
+
+library(edgeR)
+library(dplyr)
+library(biomaRt)
+library(stringr)
+
+geneTable <- read.delim("filtered_FC.txt", row.names = 1) %>% as.data.frame
+geneTable <- geneTable %>% mutate(gene_names = rownames(geneTable))
+geneTable <- distinct(geneTable, gene_names, .keep_all = TRUE) %>% dplyr::select(-gene_names)
+colnames(geneTable) <- colnames(geneTable ) %>% stringr::str_remove_all(".bam")
+
+##########Initial model matrix for MDSplot and Qc
+
+read.csv("metadata.csv") -> metadata
+metadata$Time <- as.factor(metadata$Time)
+metadata$Infection <- as.factor(metadata$Infection)
+#Individual <- factor(metadata$Individual)
+
+metadata$Infection <- relevel(metadata$Infection, ref="C")
+design <- model.matrix(~Infection + Infection:Time, data=metadata)
+
+y <- DGEList(counts=geneTable)
+keep <- filterByExpr(y, design= design)
+y <- y[keep,,keep.lib.sizes=FALSE]
+y <- normLibSizes(y, method = "TMM")
+
+fit <- glmQLFit(y, design, robust = TRUE)
+plotQLDisp(fit)
+
+y <- estimateDisp(y, design, robust = TRUE)
+plotBCV(y)
+
+####### MDS and log2cpm distribution plots before outlier removal
+
+colors <- ifelse(metadata$Infection == "C", "green", ifelse(metadata$Infection == "E", "red", ""))
+points <- ifelse(metadata$Time == "0", 0, ifelse(metadata$Time == "1h", 1, ifelse(metadata$Time == "1d", 2, ifelse(metadata$Time == "2d", 3, ifelse(metadata$Time == "4d", 4, ifelse(metadata$Time == "24d", 5, ""))))))
+points <- as.numeric(points)
+
+plotMDS(y, col=colors, pch=points, gene.selection = "common", cex.axis = 1.3, cex.lab = 1.5, cex = 1.3)
+legend("topleft",legend=levels(metadata$Time), pch=unique(points), ncol = 2, cex = 1.3, )
+
+logcounts <- cpm(y, log=TRUE)
+# Check distributions of samples using boxplots
+par(cex.axis = 1.3, cex.lab = 1.5, cex = 1.3)
+boxplot(logcounts, 
+        xlab="", 
+        ylab=expression('log'[2]*'cpm'),
+        las=2, )
+# Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts), col="blue")
+
+
+##########========================= Removing outlier samples
+
+filter(metadata, Sample != "T2d-E4") -> metadata_filtered
+metadata_filtered$Time <- as.factor(metadata_filtered$Time)
+metadata_filtered$Infection <- as.factor(metadata_filtered$Infection)
+metadata_filtered$Infection <- relevel(metadata_filtered$Infection, ref="C")
+design <- model.matrix(~Infection + Infection:Time, data=metadata_filtered)
+
+
+geneTable_filtered <- geneTable[,!(names(geneTable) == "T2d.E4")]
+
+y <- DGEList(counts=geneTable_filtered)
+keep <- filterByExpr(y, design= design)
+y <- y[keep,,keep.lib.sizes=FALSE]
+y <- normLibSizes(y, method = "TMM")
+
+fit <- glmQLFit(y, design, robust = TRUE)
+plotQLDisp(fit)
+
+y <- estimateDisp(y, design, robust = TRUE)
+plotBCV(y)
+
+colors <- ifelse(metadata_filtered$Infection == "C", "green", ifelse(metadata_filtered$Infection == "E", "red", ""))
+points <- ifelse(metadata_filtered$Time == "0", 0, ifelse(metadata_filtered$Time == "1h", 1, ifelse(metadata_filtered$Time == "1d", 2, ifelse(metadata_filtered$Time == "2d", 3, ifelse(metadata_filtered$Time == "4d", 4, ifelse(metadata_filtered$Time == "24d", 5, ""))))))
+points <- as.numeric(points)
+
+plotMDS(y, col=colors, pch=points, gene.selection = "common")
+legend("topleft",legend=levels(metadata_filtered$Time), pch=unique(points), ncol = 2, cex = .50, )
+
+logcounts <- cpm(y, log=TRUE)
+# Check distributions of samples using boxplots
+par(cex.axis=0.75)
+boxplot(logcounts, 
+        xlab="", 
+        ylab=expression('log'[2]*'cpm'),
+        las=2, )
+# Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts), col="blue")
+
+
+
+#####=========DEG Analysis
+
+### baseline experimental vs control comparison
+
+Ensembl_EvC_toptags <- topTags(glmQLFTest(fit, coef=2), n = nrow(y$counts), p.value = 1)
+write.csv(Ensembl_EvC_toptags, "Ensembl_EvC_toptags.csv")
+
+### experimental effect at 1d
+
+Ensembl_EvC_1d_toptags <- topTags(glmQLFTest(fit, coef=4), n = nrow(y$counts), p.value = 1)
+write.csv(Ensembl_EvC_1d_toptags, "Ensembl_EvC_1d_toptags.csv")
+
+### experimental effect at 1h
+
+Ensembl_EvC_1h_toptags <- topTags(glmQLFTest(fit, coef=6), n = nrow(y$counts), p.value = 1)
+write.csv(Ensembl_EvC_1h_toptags, "Ensembl_EvC_1h_toptags.csv")
+
+### experimental effect at 24d
+
+Ensembl_EvC_24d_toptags <- topTags(glmQLFTest(fit, coef=8), n = nrow(y$counts), p.value = 1)
+write.csv(Ensembl_EvC_24d_toptags, "Ensembl_EvC_24d_toptags.csv")
+
+### experimental effect at 2d
+
+Ensembl_EvC_2d_toptags <- topTags(glmQLFTest(fit, coef=10), n = nrow(y$counts), p.value = 1)
+write.csv(Ensembl_EvC_2d_toptags, "Ensembl_EvC_2d_toptags.csv")
+
+### experimental effect at 4d
+
+Ensembl_EvC_4d_toptags <- topTags(glmQLFTest(fit, coef=12), n = nrow(y$counts), p.value = 1)
+write.csv(Ensembl_EvC_4d_toptags, "Ensembl_EvC_4d_toptags.csv")
+
+#genes that respond to the infection at either timepoints versus the 0 hour baseline.
+
+Ensembl_EvC_Tv0_toptags <- topTags(glmQLFTest(fit, coef=c(4,6,8,10,12)), n = nrow(y$counts), p.value = 1)
+write.csv(Ensembl_EvC_Tv0_toptags, "Ensembl_EvC_Tv0_toptags.csv")
+
+####### Annotating Ensembl IDs
+
+### Convert Ensembl Gene IDs using gprofiler (g:convert tool)
+### Search for orthologues of Ensembl Gene IDs in zebrafish and humans for functional enrichment analysis
+### Perform GO enrichment analysis separately for the converted geneIDs, zebrafish, and human orthologues using WebGestalt Server
+
+######### Volcano Plots
+
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(ggrepel)
+
+EvC_1d <- as.data.frame(read.csv("Ensembl_EvC_1d_toptags.csv")) 
+
+EvC_1h <- as.data.frame(read.csv("Ensembl_EvC_1h_toptags.csv"))
+
+EvC_2d <- as.data.frame(read.csv("Ensembl_EvC_2d_toptags.csv"))
+
+EvC_4d <- as.data.frame(read.csv("Ensembl_EvC_4d_toptags.csv"))
+
+EvC_24d <- as.data.frame(read.csv("Ensembl_EvC_24d_toptags.csv"))
+
+EvC <- as.data.frame(read.csv("Ensembl_EvC_toptags.csv"))
+
+EvC_Tv0 <- as.data.frame(read.csv("Ensembl_EvC_Tv0_toptags.csv"))
+
+
+volcanoPlot <- function(designf_table, plotTitle){
+designf_table$diffexpressed <- "NO"
+designf_table$diffexpressed[designf_table$logFC >= 2.5 & designf_table$FDR < 0.05] <- "UP"
+designf_table$diffexpressed[designf_table$logFC <= -2.5 & designf_table$FDR < 0.05] <- "DOWN"
+
+downcount <- length(designf_table$diffexpressed[designf_table$diffexpressed == "DOWN"])
+upcount <- length(designf_table$diffexpressed[designf_table$diffexpressed == "UP"])
+nocount <- length(designf_table$diffexpressed[designf_table$diffexpressed == "NO"])
+p <- ggplot(data=designf_table, aes(x=logFC, y=-log10(FDR), col=diffexpressed)) + geom_point() + 
+        theme_minimal() +
+	scale_color_manual(labels=c(paste0("DOWN: ", downcount), paste0("NO: ", nocount), paste0("UP: ", upcount)),values=c("blue", "grey", "red")) +
+
+        geom_vline(xintercept=c(-2.5, 2.5), col="grey", linetype="longdash") +
+        geom_hline(yintercept=-log10(0.05), col="grey", linetype="longdash") +
+geom_text_repel(data= designf_table[designf_table$diffexpressed == "UP" | designf_table$diffexpressed == "DOWN",],aes(x = logFC, y = -log10(FDR),label=gprofiler_name), show.legend = FALSE, , size = 5)+
+        theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), legend.title=element_blank(), axis.text.x = element_text(size = 18, color = "black"), axis.text.y = element_text(size = 18, color = "black"), axis.title.x = element_text(size = 22, color = "black"), axis.title.y = element_text(size = 22, color = "black"), legend.text = element_text(size = 18)) + labs(x = expression("Log"["2"] ~ "Fold Change"), y= expression("-Log"["10"] ~ italic(P)), title = plotTitle)
+return(p) 
+}
+ 
+
+########## Heatmaps
+
+EvC_Tv0 <- arrange(EvC_Tv0, FDR)
+human_50_EvC_Tv0 <- filter(EvC_Tv0, hsapiens_gene != "N/A") %>% distinct(hsapiens_gene, .keep_all = TRUE)
+human_50_EvC_Tv0 <- human_50_EvC_Tv0[1:50,c(1:6,13)] %>% as.data.frame()
+rownames(human_50_EvC_Tv0) <- human_50_EvC_Tv0$hsapiens_gene
+human_50_EvC_Tv0 <- human_50_EvC_Tv0 %>% as.data.frame() %>% select(-c(X, hsapiens_gene))
+colnames(human_50_EvC_Tv0) <- str_remove_all(colnames(human_50_EvC_Tv0), "logFC.InfectionE.Time")
+human_50_EvC_Tv0 <- select(human_50_EvC_Tv0, "1h", "1d", "2d", "4d", "24d")
+
+pheatmap(human_50_EvC_Tv0, cluster_cols = F, fontsize_row = 8, angle_col = 0)
+
+EvC_Tv0 <- arrange(EvC_Tv0, FDR)
+zebrafish_50_EvC_Tv0 <- filter(EvC_Tv0, drerio_gene != "N/A") %>% distinct(drerio_gene, .keep_all = TRUE)
+zebrafish_50_EvC_Tv0 <- zebrafish_50_EvC_Tv0 [1:50,c(1:6,15)] %>% as.data.frame()
+rownames(zebrafish_50_EvC_Tv0 ) <- zebrafish_50_EvC_Tv0$drerio_gene
+zebrafish_50_EvC_Tv0  <- zebrafish_50_EvC_Tv0  %>% as.data.frame() %>% select(-c(X, drerio_gene))
+colnames(zebrafish_50_EvC_Tv0 ) <- str_remove_all(colnames(zebrafish_50_EvC_Tv0 ), "logFC.InfectionE.Time")
+zebrafish_50_EvC_Tv0 <- select(zebrafish_50_EvC_Tv0, "1h", "1d", "2d", "4d", "24d")
+
+pheatmap(zebrafish_50_EvC_Tv0, cluster_cols = F, fontsize_row = 8, angle_col = 0)
+
+################ Gene Enrichment Analysis Further Analysis
+
+library(dplyr)
+library(reshape2)
+library(pheatmap)
+
+human_pathways <- read.csv("human_enriched_pathways.csv") %>% as.data.frame() %>% select(c(Pathway.Description,Enrichment.Ratio, Timepoint))
+human_pathways <- reshape2::dcast(human_pathways,Pathway.Description ~ Timepoint, value.var = "Enrichment.Ratio")
+rownames(human_pathways) <- human_pathways$Pathway.Description
+human_pathways <- human_pathways %>% select(-Pathway.Description) %>% select(Baseline, "1h", "1d", "2d", "4d", "24d")
+human_pathways <- human_pathways %>% mutate_all(function(x){ifelse(is.na(x) == T, 0, x)})
+pheatmap(human_pathways, fontsize_row = 4, scale = "row", cluster_cols = F, angle_col = 90)
+
+zebrafish_pathways <- read.csv("zebrafish_enriched_pathways.csv") %>% as.data.frame() %>% select(c(Pathway.Description,Enrichment.Ratio, Timepoint))
+zebrafish_pathways <- reshape2::dcast(zebrafish_pathways,Pathway.Description ~ Timepoint, value.var = "Enrichment.Ratio")
+rownames(zebrafish_pathways) <- zebrafish_pathways$Pathway.Description
+zebrafish_pathways <- zebrafish_pathways %>% select(-Pathway.Description) %>% select(Baseline, "1h", "1d", "2d", "4d", "24d")
+zebrafish_pathways <- zebrafish_pathways %>% mutate_all(function(x){ifelse(is.na(x) == T, 0, x)})
+pheatmap(zebrafish_pathways, fontsize_row = 4, scale = "row", cluster_cols = F, angle_col = 90)
+
+####### Co-expression analysis using multiWGCNA
+
+library(multiWGCNA)
+library(dplyr)
+library(stringr)
+library(SummarizedExperiment)
+
+coldata <- metadata_filtered
+rownames(coldata) <- metadata_filtered$Sample %>% str_replace_all("-", ".")
+coldata$Sample <- metadata_filtered$Sample %>% str_replace_all("-", ".")
+wgcna_table <- geneTable_filtered
+
+wgcna_se <- SummarizedExperiment(assays=wgcna_table, colData=coldata)
+sampleTable = colData(wgcna_se)
+conditions1 = unique(sampleTable[,2])
+conditions2 = unique(sampleTable[,3])
+
+infection_networks = constructNetworks(wgcna_se, sampleTable, conditions1, conditions2,
+                                  networkType = "unsigned", power = 10,
+                                  minModuleSize = 40, maxBlockSize = 25000,
+                                  reassignThreshold = 0, minKMEtoStay = 0.7,
+                                  mergeCutHeight = 0.10, numericLabels = TRUE,
+                                  pamRespectsDendro = FALSE, verbose=3)
+
+results = list()
+results$overlaps = iterate(infection_networks, overlapComparisons, plot=TRUE, write = TRUE)
+
+sampleTable$Time <- factor(sampleTable$Time, levels=c("0", "1h", "1d", "2d", "4d", "24d"))
+sampleTable$Infection <- factor(sampleTable$Infection, levels=c("E","C"))
+
+results$diffModExp = runDME(infection_networks[["combined"]], 
+                            sampleTable, 
+                            p.adjust="fdr", 
+                            refCondition="Time", 
+                            testCondition="Infection")
+
+results$diffModExp -> diffexp
+diffexp <- mutate_all(diffexp, function(x) {-log10(x)}) 
+colnames(diffexp) <- c("Infection", "Time", "Time_and_Infection")
+
+
+### Y-axis is the statistical significance of associations between modules and the interaction between time and infection
+
+ggplot(diffexp, aes(x=Infection, y=Time_and_Infection)) + geom_label(aes(x=Infection, y=Time_and_Infection, label=rownames(diffexp))) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") + geom_vline(xintercept = -log10(0.05), linetype = "dashed") + theme_minimal()  + labs(x = expression("Infection (-Log"["10"] ~ "FDR)"), y= expression("Infection*Time (-Log"["10"] ~ "FDR)")) + theme(axis.text = element_text(size = 12, color = "black"),axis.line = element_line(size = 0.5, colour = "black", linetype=1))
+
+pdf("Module21_DME_Zscore_plot.pdf",width = 30, height = 15)
+diffModuleExpression(infection_networks[["combined"]], 
+                     geneList = topNGenes(infection_networks[[1]], "combined_021"), 
+                     design = sampleTable,
+                     test = "ANOVA", testColumn = 3, refColumn =2, plotTitle = "Module 21", mode = "Zscore" )
+dev.off()
+
+write.csv(topNGenes(infection_networks[[1]], "combined_021"), "Module21_DME_geneList.csv")
+
+pdf("Module24_DME_Zscore_plot.pdf",width = 30, height = 15)
+diffModuleExpression(infection_networks[["combined"]], 
+                     geneList = topNGenes(infection_networks[[1]], "combined_024"), 
+                     design = sampleTable,
+                     test = "ANOVA", testColumn = 3, refColumn =2, plotTitle = "Module 24", mode = "Zscore")
+dev.off()
+
+write.csv(topNGenes(infection_networks[[1]], "combined_024"), "Module24_DME_geneList.csv")
+
+pdf("Module40_DME_Zscore_plot.pdf",width = 30, height = 15)
+diffModuleExpression(infection_networks[["combined"]], 
+                     geneList = topNGenes(infection_networks[[1]], "combined_040"), 
+                     design = sampleTable,
+                     test = "ANOVA", testColumn = 3, refColumn =2, plotTitle = "Module 40", mode = "Zscore")
+dev.off()
+
+write.csv(topNGenes(infection_networks[[1]], "combined_040"), "Module40_DME_geneList.csv")
+
+### Focusing on immunogens only:
+
+# Step1: Go to https://www.innatedb.com/redirect.do?go=resourcesGeneLists
+# Step2: Choose Immunogenetic Related Information Source (IRIS)
+# Filter Ensembl_EvC_Tv0_toptags based on IRIS human gene ids. Sort by FDR then create heatmap
+# Input Top 50 genes for String Analysis
+
+library(dplyr)
+library(pheatmap)
+library(stringr)
+Immunogens_EvC_Tv0 <- as.data.frame(read.csv("Immunogens_Ensembl_EvC_Tv0.csv"))
+Immunogens_EvC_Tv0 <- filter(Immunogens_EvC_Tv0, FDR != "N/A") %>% filter(FDR != "#N/A") %>% distinct(human_gene_name, .keep_all = TRUE)
+Immunogens_EvC_Tv0$FDR <- as.numeric(Immunogens_EvC_Tv0$FDR)
+Immunogens_EvC_Tv0 <- arrange(Immunogens_EvC_Tv0, FDR)
+Immunogens_EvC_Tv0 <- Immunogens_EvC_Tv0[1:50,c(1,3:7)] %>% as.data.frame()
+rownames(Immunogens_EvC_Tv0) <- Immunogens_EvC_Tv0$human_gene_name
+Immunogens_EvC_Tv0 <- Immunogens_EvC_Tv0 %>% as.data.frame() %>% select(-human_gene_name)
+colnames(Immunogens_EvC_Tv0) <- str_remove_all(colnames(Immunogens_EvC_Tv0), "logFC.InfectionE.Time")
+Immunogens_EvC_Tv0 <- select(Immunogens_EvC_Tv0, "1h", "1d", "2d", "4d", "24d") %>% mutate_all(function(x) {as.numeric(x)})
+
+pheatmap(Immunogens_EvC_Tv0, cluster_cols = F, fontsize_row = 8, angle_col = 0)
