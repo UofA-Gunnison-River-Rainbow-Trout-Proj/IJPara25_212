@@ -1,0 +1,785 @@
+
+######## Merging individual vcf files to a single vcf file
+
+bcftools merge -o 60_merged.vcf -O v -m all --threads  100 -0 ${arr[@]} 
+
+######## Fixing the ploidy level in the multiallelic sites;;;;; Neutrality test/IHS only allows biallelic sites
+
+bcftools +fixploidy 60_merged.vcf -o 60_merged_fixploidy.vcf -O v --threads 100 
+
+grep -v "^#" 60_merged_fixploidy.vcf | cut -f 1 - | sort | uniq | grep "^NC" | grep -v "NC_001717" > chr.list
+
+######## Retaining only the main chromosomes (1-32)
+
+count=0
+while read p; do
+count=$((count + 1))
+  echo -e "$count" "$p" >> chr.rehead.list
+done <chr.list
+
+arr64=`cat chr.list | sed 's/^\|$//g'|paste -sd, -`
+
+
+bgzip 60_merged_fixploidy.vcf
+tabix 60_merged_fixploidy.vcf.gz
+bcftools view --regions $arr64 -o  60_merged_fixploidy_mainchrs.vcf  -O v  --threads 100 60_merged_fixploidy.vcf.gz
+
+######## Filling up the missing AF,MAF tags for filtering purposes
+
+bcftools +fill-tags 60_merged_fixploidy_mainchrs.vcf -o 60_merged_fixploidy_mainchrs_tags.vcf --threads 100 -- -t AF,MAF 
+
+######## Checkpoint 
+
+grep -v "^#" 60_merged_fixploidy_mainchrs_tags.vcf | cut -f 10- | cut -d ':' -f 1 |sort | uniq
+
+#If there are value except for 0 or 1 then we fix with bcftools norm
+
+######## Biallelic Sites and SNPs only (Filters)
+
+bcftools view --max-alleles 2 --exclude-types indels 60_merged_fixploidy_mainchrs_tags.vcf -o 60_merged_fixploidy_mainchrs_tags_biallelic.vcf -O v --threads=100
+grep -v "^#" 60_merged_fixploidy_mainchrs_tags_biallelic.vcf | cut -f 10- | cut -d ':' -f 1 |sort | uniq
+
+####### To reduce the size of the working vcf, filter base on MAF (Filters)
+
+bcftools view -q 0.01:minor 60_merged_fixploidy_mainchrs_tags_biallelic.vcf -o 60_merged_fixploidy_mainchrs_tags_biallelic_maf.vcf -O v --threads 100
+
+####### Since a variant in the same position are just identical in terms of their contribution to the computations, it's better to retain only one variant per position
+
+bcftools norm -d any --threads=100 60_merged_fixploidy_mainchrs_tags_biallelic_maf.vcf -O v  -o 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm.vcf
+
+######## Renaming chromosomes NCBI ID to chromosome numbers
+
+rm chr.rehead.list
+count=0
+while read p; do
+count=$((count + 1))
+  echo -e "$p" chr"$count" >> chr.rehead.list
+done <chr.list
+
+bcftools annotate --rename-chrs chr.rehead.list 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm.vcf > 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf --threads 100
+
+######## Compile all outputs into new directory
+
+mkdir inputs
+mv 60* inputs
+
+######## Tajima's D (Neutrality test)
+
+# Filters: https://vcftools.sourceforge.net/man_latest.html
+
+# 10KB window size
+
+vcftools --remove-filtered-geno-all --remove-indels --maf 0.01 --max-missing 0.5 --minGQ 20 --vcf 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf --out tajimasd --TajimaD 10000
+
+# 2500bp	 window size
+
+vcftools --remove-filtered-geno-all --remove-indels --maf 0.01 --max-missing 0.5 --minGQ 20 --vcf 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf --out tajimasd --TajimaD 2500
+
+
+######## Go to R and plot the output of Tajima's D
+
+#################################### IHS Scores per chromosome
+
+##### Splitting merge file to individual chromosomes followed decompression
+
+mkdir ihs 
+cp 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf ihs
+
+bgzip 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf
+tabix 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf.gz
+
+bcftools index -s 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf.gz | cut -f 1 | while read C; do bcftools view -O z -o split.${C}.vcf.gz 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf.gz  "${C}" ; done
+
+arr=`ls split*`
+parallel 'bgzip -d {}' ::: ${arr[@]}
+
+arr=`ls split* | cut -f 1,2 -d "."`
+for file in ${arr[@]}; do
+mkdir $file
+mv $file.vcf $file
+done
+
+##### PLINK then IHS (per-chromosome); normalization is done with a winsize of 10kb 
+
+## LINK: https://github.com/szpiech/selscan/issues/29
+
+for file in ${arr[@]}; do
+cd $file
+
+plink --const-fid --vcf $file.vcf --recode --out plink --threads 100 --allow-extra-chr --set-missing-var-ids @:#:\$1,\$2 --autosome-num 32
+sort -nk 4 plink.map > sorted.map
+awk '{ print $1"\t"$2"\t"$4"\t"$4 }' sorted.map > new_file.map
+
+selscan --ihs --vcf $file.vcf --map new_file.map --out ihs_scores --threads 100 --trunc-ok  
+norm --ihs --files ihs_scores*.out --bp-win --winsize 10000
+
+
+cd ../
+done
+
+###### Combine normalization
+
+for file in ${arr[@]}; do
+cd $file
+mv ihs_scores.ihs.out $file.ihs.out
+cp $file.ihs.out ../
+cd ../
+done
+
+mkdir all_ihs_outs
+mv *.ihs.out all_ihs_outs
+cd all_ihs_outs
+
+arr=`ls *.ihs.out`
+norm --ihs --files ${arr[@]} --bp-win --winsize 10000
+
+##################################### LD Calculation
+
+plink --vcf 60_merged_fixploidy_mainchrs_tags_biallelic_maf_norm_renamed.vcf --double-id  \
+--set-missing-var-ids @:# \
+--maf 0.01 --geno 0.1 --mind 0.5 \
+--thin-count 50000 -r2  --ld-window 100 --ld-window-kb 1000 \
+--ld-window-r2 0 \
+--make-bed --out ld \
+--autosome-num 32 
+
+cat ld.ld | sed 1,1d | awk -F " " 'function abs(v) {return v < 0 ? -v : v}BEGIN{OFS="\t"}{print abs($5-$2),$7}' | sort -k1,1n > ld.ld.summary
+
+##############################
+## R environment used below ##
+##############################
+
+#################################################################################################
+########### Final Revision Date: July 18, 2022
+########### By: Renald James Legaspi
+########### To: Abdullah Abobkar Mohammed Gharamah
+########### Rainbow Trout Whirling Disease
+#################################################################################################
+
+############################### Tajima's D 10kb approach ########################################
+library(tidyverse)
+library(qqman)
+options(scipen = 999)
+as.data.frame(read_tsv("tajimasd.10kb.Tajima.D")) -> tajimas
+mutate(tajimas, chrnum = as.numeric(str_remove_all(CHROM, "chr"))) %>% arrange(chrnum, BIN_START) -> tajimas
+mutate(tajimas,cont_bins = seq(tajimas$BIN_START[1], (nrow(tajimas) - 1) * 10000, 10000)) -> tajimas
+
+## Retain  (-Inf, 0] which signifies positive selection
+
+filter(tajimas, TajimaD <= 0) -> tajimas
+abs(tajimas$TajimaD) -> tajimas$TajimaD
+
+## Check the 99.5th tile of the tajima's D
+
+quantile(tajimas$TajimaD, 0.995) -> significant_TajimaD
+
+## Convert to qqman format
+
+mutate(tajimas, BIN_END = BIN_START + 10000) -> tajimas
+mutate(tajimas, SNP = paste(chrnum,":",BIN_START, ":", BIN_END,sep = "")) -> manhattan_tajima
+manhattan_tajima <- dplyr::select(manhattan_tajima, c(cont_bins, chrnum, TajimaD, SNP))
+colnames(manhattan_tajima) <- c("BP", "CHR", "P", "SNP")
+
+highlight_snps <- filter(manhattan_tajima, P >= significant_TajimaD)
+highlight_snps <- highlight_snps$SNP
+
+#png("manhattan_tajimasD_10kb.png", width = 2000, height = 300)
+#manhattan(manhattan_tajima, suggestiveline = F, genomewideline = significant_TajimaD, 
+#+           logp = F, highlight = highlight_snps, ylab = "Absolute Negative Tajima's D", cex.lab=1.25, cex.axis=1.00)
+#dev.off()
+
+###################################### Identifying Genes under the positively selected bins
+library(biomaRt)
+listEnsembl()
+ensembl <- useEnsembl(biomart = "genes", dataset = "omykiss_gene_ensembl")
+
+positively_selected_tajima <- filter(manhattan_tajima, P >= significant_TajimaD)
+
+filterlist <- list(positively_selected_tajima[1,4], "protein_coding") 
+
+all.results=getBM(attributes = c("ensembl_gene_id","hgnc_symbol", "chromosome_name", 
+                                 "start_position", "end_position", "go_id", "name_1006"),
+                  filters = c("chromosomal_region","biotype"),values = filterlist, mart = ensembl)
+mutate(all.results, query = positively_selected_tajima[1,4])
+
+for (x in 2:nrow(positively_selected_tajima)) {
+  
+  cregion <- positively_selected_tajima[x,4]
+  filterlist <- list(cregion, "protein_coding")
+  print(filterlist)
+  results_running=getBM(attributes = c("ensembl_gene_id","hgnc_symbol", "chromosome_name", 
+                                       "start_position", "end_position", "go_id", "name_1006"),
+                        filters = c("chromosomal_region","biotype"),values = filterlist, mart = ensembl)
+  mutate(results_running, query = cregion) -> results_running
+  all.results <- rbind(all.results, results_running)
+}
+
+merge(manhattan_tajima, all.results, by.x = "SNP", by.y = "query") -> annotated_positively_selected_tajima
+group_by(positively_selected_tajima, CHR) %>% summarize(total_bins_significant = n()) %>% arrange(desc(total_bins_significant)) -> significant_TajimaD_tally_per_chromosome
+
+
+annotated_positively_selected_tajima2 <- annotated_positively_selected_tajima %>% mutate(SNP = ensembl_gene_id) %>%
+  dplyr::select(c(BP, CHR, P, SNP))
+
+top_selected_chr <- filter(annotated_positively_selected_tajima2, CHR == as.numeric(significant_TajimaD_tally_per_chromosome[1,1]))
+
+#################### Identifying all genes in all chromosomes
+
+library(biomaRt)
+listEnsembl()
+ensembl <- useEnsembl(biomart = "genes", dataset = "omykiss_gene_ensembl")
+positively_selected_tajima <- filter(manhattan_tajima, P >= significant_TajimaD)
+filterlist <- list(positively_selected_tajima[1,4], "protein_coding") 
+all.results=getBM(attributes = c("ensembl_gene_id","hgnc_symbol","ensembl_transcript_id", "external_gene_name", "entrezgene_id", "chromosome_name", 
+                                 "start_position", "end_position", "go_id", "name_1006"),
+                  filters = c("chromosomal_region","biotype"),values = filterlist, mart = ensembl)
+mutate(all.results, query = positively_selected_tajima[1,4])
+
+for (x in 2:nrow(positively_selected_tajima)) {
+  
+  cregion <- positively_selected_tajima[x,4]
+  filterlist <- list(cregion, "protein_coding")
+  print(x)
+  results_running=getBM(attributes = c("ensembl_gene_id","hgnc_symbol","ensembl_transcript_id", "external_gene_name", "entrezgene_id", "chromosome_name", 
+                                       "start_position", "end_position", "go_id", "name_1006"),
+                        filters = c("chromosomal_region","biotype"),values = filterlist, mart = ensembl)
+  mutate(results_running, query = cregion) -> results_running
+  all.results <- rbind(all.results, results_running)
+}
+
+merge(manhattan_tajima, all.results, by.x = "SNP", by.y = "query") -> annotated_positively_selected_tajima
+group_by(positively_selected_tajima, CHR) %>% summarize(total_bins_significant = n()) %>% arrange(desc(total_bins_significant)) -> significant_TajimaD_tally_per_chromosome
+
+
+library(stringr)
+
+Tajimas_D_10KB_all_chromosomes_significant_genes <- annotated_positively_selected_tajima %>%
+  arrange(ensembl_gene_id) %>%
+  filter(duplicated(ensembl_gene_id) == FALSE) %>% dplyr::select(c(SNP,BP, CHR, P, ensembl_gene_id, ensembl_transcript_id, hgnc_symbol, external_gene_name)) %>%
+  arrange(CHR, BP, SNP) %>%   mutate(across(where(is.character), ~ na_if(.,""))) %>% 
+  mutate(hgnc_symbol = ifelse(is.na(hgnc_symbol) == T, 0, hgnc_symbol)) %>%
+  mutate(external_gene_name = ifelse(is.na(external_gene_name ) == T, 0, external_gene_name)) 
+
+colnames(Tajimas_D_10KB_all_chromosomes_significant_genes) <- c("Significant_Window_Location", "Basepair_Location", "Chromosome", "TajimasD", "ensembl_gene_id", "ensembl_transcript_id", "hgnc_symbol", "external_gene_name")
+write.csv(Tajimas_D_10KB_all_chromosomes_significant_genes, "Tajimas_D_10KB_all_chromosomes_significant_genes.csv", quote = FALSE)
+
+
+##################### Plotting on chromosomes 
+
+
+## Plotting genes
+all.results2 <- all.results %>% 
+  filter(chromosome_name == as.numeric(significant_TajimaD_tally_per_chromosome[1,1])) %>% dplyr::select(ensembl_gene_id, chromosome_name, start_position, end_position)
+
+all.results2 <- distinct(all.results2, ensembl_gene_id, .keep_all = T)
+
+#################### Genes overlapping with Chr9
+
+chr9_10kb <- all.results %>% 
+  filter(chromosome_name == 9) %>% dplyr::select(ensembl_gene_id, chromosome_name, start_position, end_position)
+
+chr9_10kb <- distinct(chr9_10kb, ensembl_gene_id, .keep_all = T)
+
+#################### Convert Gene Names to Known Names
+
+fixed_genes_10kb <- read.csv("Genes_of_Interest_Combined_For_Plots_R.csv") %>% dplyr::filter(approach == "10KB")
+all.results2b <- merge(all.results2, fixed_genes_10kb, by.x = "ensembl_gene_id", by.y = "ensembl_id") %>% dplyr::select(gene, chromosome_name, start_position, end_position)
+
+
+####################
+genes.to.plot <- toGRanges(all.results2b[c(2,3,4,1)])
+custom.genome <- toGRanges("23:1-62880378")
+## Plotting BINS
+
+all.results3 <- tajimas %>% 
+  filter(chrnum == as.numeric(significant_TajimaD_tally_per_chromosome[1,1]) & TajimaD >= significant_TajimaD) %>% dplyr::select(chrnum, BIN_START, BIN_END, N_SNPS)
+
+bins.to.plot <- toGRanges(all.results3[c(1,2,3,4)])
+
+png("KaryoPlot_10KB.png", width = 2000, height = 1000)
+kp <- plotKaryotype(genome = custom.genome, plot.type = 3)
+kpPlotMarkers(kp, data = bins.to.plot, labels = bins.to.plot$N_SNPS, r0=-0.05, r1=1, marker.parts = c(0.2, 0.1, 0.1))
+kpPlotMarkers(kp, data = genes.to.plot, labels = genes.to.plot$gene, r0=-0.1, r1=-1, pos = 2, marker.parts = c(0.2, 0.1, 0.1))
+kpAddBaseNumbers(kp,cex = 1, add.units = T)
+dev.off()
+
+################### Output all number of SNPs
+
+tally.of.SNP.10kb <- tajimas %>%  filter(TajimaD >= significant_TajimaD)
+write.csv(tally.of.SNP.10kb, "10-01-2023_tally.of.SNP.10kb.csv")
+
+############################### End of  10kb approach ########################################
+
+
+############################### Tajima's D 2.5kb approach ########################################
+
+library(tidyverse)
+
+options(scipen = 999)
+as.data.frame(read_tsv("tajimasd.2500bp.Tajima.D")) -> tajimas
+mutate(tajimas, chrnum = as.numeric(str_remove_all(CHROM, "chr"))) %>% arrange(chrnum, BIN_START) -> tajimas
+
+mutate(tajimas,cont_bins = seq(tajimas$BIN_START[1], (nrow(tajimas) + 1) * 2500, 2500)) -> tajimas
+
+## Retain  (-Inf, 0] which signifies positive selection
+
+filter(tajimas, TajimaD <= 0) -> tajimas
+abs(tajimas$TajimaD) -> tajimas$TajimaD
+
+## Check the 99.5th tile of the tajima's D
+
+quantile(tajimas$TajimaD, 0.999) -> significant_TajimaD
+
+## Check the 99.5th tile of the tajima's D
+
+mutate(tajimas, BIN_END = BIN_START + 2500) -> tajimas
+mutate(tajimas, SNP = paste(chrnum,":",BIN_START, ":", BIN_END,sep = "")) -> manhattan_tajima
+manhattan_tajima <- dplyr::select(manhattan_tajima, c(cont_bins, chrnum, TajimaD, SNP))
+colnames(manhattan_tajima) <- c("BP", "CHR", "P", "SNP")
+
+highlight_snps <- filter(manhattan_tajima, P >= significant_TajimaD)
+highlight_snps <- highlight_snps$SNP
+
+png("manhattan_tajimasD_2500bp.png", width = 2000, height = 300)
+manhattan(manhattan_tajima, suggestiveline = F, genomewideline = significant_TajimaD, 
+          logp = F, highlight = highlight_snps, ylab = "Absolute Negative Tajima's D")
+dev.off()
+
+manhattan(manhattan_tajima, suggestiveline = F, genomewideline = significant_TajimaD, logp = F, highlight = highlight_snps, ylab = "Absolute Negative Tajima's D", cex.lab=1.25, cex.axis=1.00)
+
+## Identifying Overlapping Genes Without the inflection point of LD Decay
+
+listEnsembl()
+ensembl <- useEnsembl(biomart = "genes", dataset = "omykiss_gene_ensembl")
+
+positively_selected_tajima <- filter(manhattan_tajima, P >= significant_TajimaD)
+filterlist <- list(positively_selected_tajima[1,4], "protein_coding") 
+
+all.results=getBM(attributes = c("ensembl_gene_id","hgnc_symbol", "chromosome_name", 
+                                 "start_position", "end_position", "go_id", "name_1006"),
+                  filters = c("chromosomal_region","biotype"),values = filterlist, mart = ensembl)
+
+
+for (x in 2:nrow(positively_selected_tajima)) {
+  
+  cregion <- positively_selected_tajima[x,4]
+  filterlist <- list(cregion, "protein_coding")
+  print(x)
+  results_running=getBM(attributes = c("ensembl_gene_id","hgnc_symbol", "chromosome_name", 
+                                       "start_position", "end_position", "go_id", "name_1006"),
+                        filters = c("chromosomal_region","biotype"),values = filterlist, mart = ensembl)
+  mutate(results_running, query = cregion) -> results_running
+  all.results <- rbind(all.results, results_running)
+}
+
+merge(manhattan_tajima, all.results, by.x = "SNP", by.y = "query") -> annotated_positively_selected_tajima
+group_by(positively_selected_tajima, CHR) %>% summarize(total_bins_significant = n()) %>% arrange(desc(total_bins_significant)) -> significant_TajimaD_tally_per_chromosome
+
+
+annotated_positively_selected_tajima2 <- annotated_positively_selected_tajima %>% mutate(SNP = ensembl_gene_id) %>%
+  dplyr::select(c(BP, CHR, P, SNP))
+
+top_selected_chr <- filter(annotated_positively_selected_tajima2, CHR == as.numeric(significant_TajimaD_tally_per_chromosome[1,1]))
+
+#################### Identifying all genes in all chromosomes
+
+library(biomaRt)
+listEnsembl()
+ensembl <- useEnsembl(biomart = "genes", dataset = "omykiss_gene_ensembl")
+positively_selected_tajima <- filter(manhattan_tajima, P >= significant_TajimaD)
+filterlist <- list(positively_selected_tajima[1,4], "protein_coding") 
+all.results=getBM(attributes = c("ensembl_gene_id","hgnc_symbol","ensembl_transcript_id", "external_gene_name", "entrezgene_id", "chromosome_name", 
+                                 "start_position", "end_position", "go_id", "name_1006"),
+                  filters = c("chromosomal_region","biotype"),values = filterlist, mart = ensembl)
+mutate(all.results, query = positively_selected_tajima[1,4])
+
+for (x in 2:nrow(positively_selected_tajima)) {
+  
+  cregion <- positively_selected_tajima[x,4]
+  filterlist <- list(cregion, "protein_coding")
+  print(x)
+  results_running=getBM(attributes = c("ensembl_gene_id","hgnc_symbol","ensembl_transcript_id", "external_gene_name", "entrezgene_id", "chromosome_name", 
+                                       "start_position", "end_position", "go_id", "name_1006"),
+                        filters = c("chromosomal_region","biotype"),values = filterlist, mart = ensembl)
+  mutate(results_running, query = cregion) -> results_running
+  all.results <- rbind(all.results, results_running)
+}
+
+merge(manhattan_tajima, all.results, by.x = "SNP", by.y = "query") -> annotated_positively_selected_tajima
+group_by(positively_selected_tajima, CHR) %>% summarize(total_bins_significant = n()) %>% arrange(desc(total_bins_significant)) -> significant_TajimaD_tally_per_chromosome
+
+
+library(stringr)
+
+Tajimas_D_2500bp_all_chromosomes_significant_genes <- annotated_positively_selected_tajima %>%
+  arrange(ensembl_gene_id) %>%
+  filter(duplicated(ensembl_gene_id) == FALSE) %>% dplyr::select(c(SNP,BP, CHR, P, ensembl_gene_id, ensembl_transcript_id, hgnc_symbol, external_gene_name)) %>%
+  arrange(CHR, BP, SNP) %>%   mutate(across(where(is.character), ~ na_if(.,""))) %>% 
+  mutate(hgnc_symbol = ifelse(is.na(hgnc_symbol) == T, 0, hgnc_symbol)) %>%
+  mutate(external_gene_name = ifelse(is.na(external_gene_name ) == T, 0, external_gene_name)) 
+
+colnames(Tajimas_D_2500bp_all_chromosomes_significant_genes) <- c("Significant_Window_Location", "Basepair_Location", "Chromosome", "TajimasD", "ensembl_gene_id", "ensembl_transcript_id", "hgnc_symbol", "external_gene_name")
+write.csv(Tajimas_D_2500bp_all_chromosomes_significant_genes, "Tajimas_D_2500bp_all_chromosomes_significant_genes.csv", quote = FALSE)
+
+##################### Plotting on chromosomes 
+
+## Plotting genes
+all.results2 <- all.results %>% 
+  filter(chromosome_name == as.numeric(significant_TajimaD_tally_per_chromosome[1,1])) %>% dplyr::select(ensembl_gene_id, chromosome_name, start_position, end_position)
+
+all.results2 <- distinct(all.results2, ensembl_gene_id, .keep_all = T)
+
+#################### Checking if the Selected Regions matches on Chromosome 9
+
+chr9_2500bp <- all.results %>% 
+  filter(chromosome_name == 9) %>% dplyr::select(ensembl_gene_id, chromosome_name, start_position, end_position)
+
+chr9_2500bp <- distinct(chr9_2500bp, ensembl_gene_id, .keep_all = T)
+
+
+#################### Convert Gene Names to Known Names
+
+fixed_genes_2500bp <- read.csv("Genes_of_Interest_Combined_For_Plots_R.csv") %>% dplyr::filter(approach == "2500bp")
+all.results2b <- merge(all.results2, fixed_genes_2500bp, by.x = "ensembl_gene_id", by.y = "ensembl_id") %>% dplyr::select(gene, chromosome_name, start_position, end_position)
+
+genes.to.plot <- toGRanges(all.results2b[c(2,3,4,1)])
+custom.genome <- toGRanges("23:1-62880378")
+## Plotting BINS
+
+all.results3 <- tajimas %>% 
+  filter(chrnum == as.numeric(significant_TajimaD_tally_per_chromosome[1,1]) & TajimaD >= significant_TajimaD) %>% dplyr::select(chrnum, BIN_START, BIN_END, N_SNPS)
+
+bins.to.plot <- toGRanges(all.results3[c(1,2,3,4)])
+
+png("KaryoPlot_2500bp.png", width = 2000, height = 1000)
+kp <- plotKaryotype(genome = custom.genome, plot.type = 3)
+kpPlotMarkers(kp, data = bins.to.plot, labels = bins.to.plot$N_SNPS, r0=-0.05, r1=1, marker.parts = c(0.2, 0.1, 0.1))
+kpPlotMarkers(kp, data = genes.to.plot, labels = genes.to.plot$gene, r0=-0.1, r1=-1, pos = 2, marker.parts = c(0.2, 0.1, 0.1))
+kpAddBaseNumbers(kp,cex = 1, add.units = T)
+dev.off()
+
+################### Output all number of SNPs
+
+tally.of.SNP.2500bp <- tajimas %>%  filter(TajimaD >= significant_TajimaD)
+write.csv(tally.of.SNP.2500bp, "10-01-2023_tally.of.SNP.2500bp.csv")
+
+
+
+#################### Plotting on chromosomes with fixed gene names (Without Inflection)
+
+as.data.frame(read.csv("Genes_of_Interest_Based_on_TajimasD_2500bp_windows.csv")) -> fixed_genes
+
+fixed_results <- merge(all.results, fixed_genes, by.x = "ensembl_gene_id", by.y = "Ensembl.ID")
+fixed_results <- filter(fixed_results, chromosome_name == as.numeric(significant_TajimaD_tally_per_chromosome[1,1])) %>% dplyr::select(Fixed.Gene.ID, chromosome_name, start_position, end_position) %>%
+  distinct(Fixed.Gene.ID, .keep_all = T)
+
+fixed.genes.to.plot <- toGRanges(fixed_results[c(2,3,4,1)])
+custom.genome <- toGRanges("23:1-62880378")
+
+
+
+#png("top_selected_chromosome_2500bp_window.png", width = 2000, height = 1000)
+kp <- plotKaryotype(genome = custom.genome, plot.type = 3)
+kpPlotMarkers(kp, data = bins.to.plot, labels = bins.to.plot$N_SNPS, r0=-0.05, r1=1, marker.parts = c(0.2, 0.1, 0.1))
+kpPlotMarkers(kp, data = fixed.genes.to.plot, labels = fixed.genes.to.plot$Fixed.Gene.ID, r0=-0.1, r1=-1, pos = 2, marker.parts = c(0.2, 0.1, 0.1))
+kpAddBaseNumbers(kp,cex = 1, add.units = T)
+#dev.off()
+
+################### Determining Normalized Density Per Chromosome (Tajima's D)
+
+options(scipen = 999)
+assembly_report <- as.data.frame(read_tsv("Omykiss_assembly.tsv"))[,c(4,12)] 
+colnames(assembly_report) <- c("CHR", "LENGTH")
+assembly_report <- assembly_report %>% filter(CHR %in% seq(1:32))
+density.selection.signals <- merge(inf.significant_TajimaD_tally_per_chromosome, assembly_report) %>% mutate(density.across.length = total_bins_significant/LENGTH)
+density.selection.signals.sum <- sum(density.selection.signals$density.across.length)
+density.selection.signals <- mutate(density.selection.signals,normalized.density = density.across.length/density.selection.signals.sum) %>% arrange(desc(normalized.density))
+
+write.csv(density.selection.signals, "normalized_density_TajimasD_2500bp.csv")
+write.csv(density.selection.signals, "normalized_density_TajimasD_10kb.csv")
+
+library(ggpubr)
+
+png("normalized_density_TajimasD_2500bp.png", width = 500, height = 500)
+png("normalized_density_TajimasD_10kb.png", width = 500, height = 500)
+
+ggbarplot(density.selection.signals, x = "CHR", y = "normalized.density", color = "black",        
+          palette = "jco",sort.val = "desc", x.text.angle = 90, fill = "grey", xlab = "Chromosome",
+          ylab = "Normalized Density of Significant Selection Signals Per Base", ylim=c(0,0.4)
+)
+dev.off()
+
+############################### End of  2500bp approach    ########################################
+
+
+############################### IHS approach ########################################
+
+library(stringr)
+
+list.files() -> ind.chr.files
+
+init.frame <- as.data.frame(read_tsv(ind.chr.files[1], col_names = F)) %>% 
+  mutate(chrnum = as.numeric(str_remove(str_split_i(ind.chr.files[1], "chr", 2), ".ihs.out.100bins.norm.10kb.windows")))
+for (i in 2:length(ind.chr.files)) {
+  current.frame <- as.data.frame(read_tsv(ind.chr.files[i], col_names = F)) %>% 
+    mutate(chrnum = as.numeric(str_remove(str_split_i(ind.chr.files[i], "chr", 2), ".ihs.out.100bins.norm.10kb.windows")))
+  rbind(init.frame, current.frame) -> init.frame
+}
+
+### Removing rows with -1 values under column 5
+colnames(init.frame) <- c("BIN_START", "BIN_END", "TOT_SCORE", "GT_FRAC", "WINDOW_PERCENTILE", "chrnum")
+arrange(init.frame, chrnum, BIN_START) -> init.frame
+mutate(init.frame,cont_bins = seq(init.frame$BIN_START[1], (nrow(init.frame)) * 10000, 10000)) -> ihs_frame
+
+
+mutate(ihs_frame, SNP = paste(chrnum,":",BIN_START, ":", BIN_END,sep = "")) -> manhattan_ihs
+manhattan_ihs <- dplyr::select(manhattan_ihs, c(cont_bins, chrnum, GT_FRAC, SNP, WINDOW_PERCENTILE))
+
+highlight_windows <- filter(manhattan_ihs, WINDOW_PERCENTILE == 1)
+positively_selected_ihs <- filter(manhattan_ihs, WINDOW_PERCENTILE == 1)
+highlight_windows  <- highlight_windows$SNP
+
+
+
+manhattan_ihs <- dplyr::select(manhattan_ihs, c(cont_bins, chrnum, GT_FRAC, SNP))
+colnames(manhattan_ihs) <- c("BP", "CHR", "P", "SNP")
+
+manhattan(manhattan_ihs, suggestiveline = F, logp = F, highlight = highlight_windows, ylab = "Normalized IHS Scores", cex.lab=1.25, cex.axis=1.00)
+
+
+###################Plotting genes overlapped with IHS signals
+
+
+listEnsembl()
+ensembl <- useEnsembl(biomart = "genes", dataset = "omykiss_gene_ensembl")
+ihs.filterlist <- list(positively_selected_ihs[1,4], "protein_coding") 
+ihs.all.results=getBM(attributes = c("ensembl_gene_id","hgnc_symbol","ensembl_transcript_id", "external_gene_name", "entrezgene_id", "chromosome_name", 
+                                     "start_position", "end_position", "go_id", "name_1006"),
+                      filters = c("chromosomal_region","biotype"),values = ihs.filterlist, mart = ensembl)
+mutate(ihs.all.results, query = positively_selected_ihs[1,4]) -> ihs.all.results
+
+for (x in 2:nrow(positively_selected_ihs)) {
+  
+  cregion <- positively_selected_ihs[x,4]
+  ihs.filterlist <- list(cregion, "protein_coding")
+  print(x)
+  results_running=getBM(attributes = c("ensembl_gene_id","hgnc_symbol","ensembl_transcript_id", "external_gene_name", "entrezgene_id", "chromosome_name", 
+                                       "start_position", "end_position", "go_id", "name_1006"),
+                        filters = c("chromosomal_region","biotype"),values = ihs.filterlist, mart = ensembl)
+  mutate(results_running, query = cregion) -> results_running
+  ihs.all.results <- rbind(ihs.all.results, results_running)
+}
+
+merge(manhattan_ihs, ihs.all.results, by.x = "SNP", by.y = "query") -> annotated_positively_selected_ihs
+group_by(positively_selected_ihs, chrnum) %>% summarize(total_bins_significant = n()) %>% arrange(desc(total_bins_significant)) -> significant_ihs_tally_per_chromosome
+
+
+ihs.all.results2 <- ihs.all.results %>% filter(chromosome_name == as.numeric(ihs.density.selection.signals[1,1])) %>% dplyr::select(ensembl_gene_id, chromosome_name, start_position, end_position)
+ihs.all.results2 <- distinct(ihs.all.results2, ensembl_gene_id, .keep_all = T)
+ihs_fixed_genes_10kb <- read.csv("Genes_of_Interest_Combined_For_Plots_R.csv") %>% dplyr::filter(approach == "IHS")
+
+ihs.all.results2b <- merge(ihs.all.results2, ihs_fixed_genes_10kb, by.x = "ensembl_gene_id", by.y = "ensembl_id") %>% dplyr::select(gene, chromosome_name, start_position, end_position)
+
+ihs.genes.to.plot <- toGRanges(ihs.all.results2b[c(2,3,4,1)])
+custom.genome <- toGRanges("23:1-62880378")
+
+#################### Identifying all genes in all chromosomes
+
+merge(manhattan_ihs, ihs.all.results, by.x = "SNP", by.y = "query") -> annotated_positively_selected_ihs
+
+library(stringr)
+
+IHS_10KB_all_chromosomes_significant_genes <- annotated_positively_selected_ihs %>%
+  arrange(ensembl_gene_id) %>%
+  filter(duplicated(ensembl_gene_id) == FALSE) %>% dplyr::select(c(SNP,BP, CHR, P, ensembl_gene_id, ensembl_transcript_id, hgnc_symbol, external_gene_name)) %>%
+  arrange(CHR, BP, SNP) %>%   mutate(across(where(is.character), ~ na_if(.,""))) %>% 
+  mutate(hgnc_symbol = ifelse(is.na(hgnc_symbol) == T, 0, hgnc_symbol)) %>%
+  mutate(external_gene_name = ifelse(is.na(external_gene_name ) == T, 0, external_gene_name)) 
+
+colnames(IHS_10KB_all_chromosomes_significant_genes) <- c("Significant_Window_Location", "Basepair_Location", "Chromosome", "IHS", "ensembl_gene_id", "ensembl_transcript_id", "hgnc_symbol", "external_gene_name")
+write.csv(IHS_10KB_all_chromosomes_significant_genes, "IHS_10KB_all_chromosomes_significant_genes.csv", quote = FALSE)
+## Plotting BINS
+
+ihs.all.results3 <- ihs_frame %>% 
+  filter(chrnum == as.numeric(ihs.density.selection.signals[1,1]) & WINDOW_PERCENTILE == 1) %>% mutate(EXTREME_SCORES = round(TOT_SCORE*GT_FRAC)) %>% dplyr::select(chrnum, BIN_START, BIN_END, EXTREME_SCORES)
+
+ihs.bins.to.plot <- toGRanges(ihs.all.results3[c(1,2,3,4)])
+
+png("KaryoPlot_IHS.png", width = 2000, height = 1100)
+
+kp <- plotKaryotype(genome = custom.genome, plot.type = 3)
+kpPlotMarkers(kp, data = ihs.bins.to.plot, labels = ihs.bins.to.plot$EXTREME_SCORES, r0=-0.05, r1=1, marker.parts = c(0.2, 0.1, 0.1))
+kpPlotMarkers(kp, data = ihs.genes.to.plot, labels = ihs.genes.to.plot$gene, r0=-0.1, r1=-1, pos = 2, marker.parts = c(0.2, 0.1, 0.1))
+kpAddBaseNumbers(kp,cex = 1, add.units = T)
+dev.off()
+
+as.data.frame(rbind(assembly_report, c(29, 47748341))) %>% arrange(CHR)-> assembly_report 
+group_by(positively_selected_ihs, chrnum) %>% summarize(total_bins_significant = n()) %>% arrange(desc(total_bins_significant)) -> significant_ihs_tally_per_chromosome
+
+ihs.density.selection.signals <- merge(significant_ihs_tally_per_chromosome, assembly_report, by.x = "chrnum", by.y = "CHR") %>% mutate(density.across.length = total_bins_significant/LENGTH)
+ihs.density.selection.signals.sum <- sum(ihs.density.selection.signals$density.across.length)
+ihs.density.selection.signals <- mutate(ihs.density.selection.signals,normalized.density = density.across.length/ihs.density.selection.signals.sum) %>% arrange(desc(normalized.density))
+write.csv(ihs.density.selection.signals, "normalized_density_IHS_10KB.csv")
+
+png("normalized_density_IHS_10KB.png", width = 1000, height = 500)
+
+ggbarplot(ihs.density.selection.signals, x = "chrnum", y = "normalized.density", color = "black",        
+          palette = "jco",sort.val = "desc", x.text.angle = 90, fill = "grey", xlab = "Chromosome",
+          ylab = "Normalized Density of Significant Selection Signals Per Base", ylim=c(0,0.1)
+)
+dev.off()
+
+write.csv(ihs.density.selection.signals, "normalized_density_IHS_10kb.csv")
+############################### SNP per windows
+
+tally.of.ihs.snps <- dplyr::filter(ihs_frame, WINDOW_PERCENTILE == "1")
+write.csv(tally.of.ihs.snps,"10-01-2023_tally.of.IHS")
+
+###################Plotting genes overlapped with IHS signals
+
+
+listEnsembl()
+ensembl <- useEnsembl(biomart = "genes", dataset = "omykiss_gene_ensembl")
+
+ihs.filterlist <- list(positively_selected_ihs[1,4], "protein_coding") 
+
+ihs.all.results=getBM(attributes = c("ensembl_gene_id","hgnc_symbol", "chromosome_name", 
+                                     "start_position", "end_position", "go_id", "name_1006"),
+                      filters = c("chromosomal_region","biotype"),values = ihs.filterlist, mart = ensembl)
+mutate(ihs.all.results, query = positively_selected_ihs[1,4]) -> ihs.all.results
+
+for (x in 2:nrow(positively_selected_ihs)) {
+  
+  cregion <- positively_selected_ihs[x,4]
+  ihs.filterlist <- list(cregion, "protein_coding")
+  print(ihs.filterlist)
+  results_running=getBM(attributes = c("ensembl_gene_id","hgnc_symbol", "chromosome_name", 
+                                       "start_position", "end_position", "go_id", "name_1006"),
+                        filters = c("chromosomal_region","biotype"),values = ihs.filterlist, mart = ensembl)
+  mutate(results_running, query = cregion) -> results_running
+  ihs.all.results <- rbind(ihs.all.results, results_running)
+}
+
+merge(manhattan_ihs, ihs.all.results, by.x = "SNP", by.y = "query") -> annotated_positively_selected_ihs
+group_by(positively_selected_ihs, chrnum) %>% summarize(total_bins_significant = n()) %>% arrange(desc(total_bins_significant)) -> significant_ihs_tally_per_chromosome
+
+#################### Genes overlapping with Chr9
+
+chr9_IHS <- ihs.all.results %>% 
+  filter(chromosome_name == 9) %>% dplyr::select(ensembl_gene_id, chromosome_name, start_position, end_position)
+
+chr9_IHS <- distinct(chr9_IHS, ensembl_gene_id, .keep_all = T)
+
+
+#################
+
+ihs.all.results2 <- ihs.all.results %>% filter(chromosome_name == as.numeric(ihs.density.selection.signals[1,1])) %>% dplyr::select(ensembl_gene_id, chromosome_name, start_position, end_position)
+
+ihs.all.results2 <- distinct(ihs.all.results2, ensembl_gene_id, .keep_all = T)
+ihs.genes.to.plot <- toGRanges(ihs.all.results2[c(2,3,4,1)])
+custom.genome <- toGRanges("23:1-62880378")
+## Plotting BINS
+
+ihs.all.results3 <- ihs_frame %>% 
+  filter(chrnum == as.numeric(ihs.density.selection.signals[1,1]) & WINDOW_PERCENTILE == 1) %>% mutate(EXTREME_SCORES = round(TOT_SCORE*GT_FRAC)) %>% dplyr::select(chrnum, BIN_START, BIN_END, EXTREME_SCORES)
+
+ihs.bins.to.plot <- toGRanges(ihs.all.results3[c(1,2,3,4)])
+
+kp <- plotKaryotype(genome = custom.genome, plot.type = 3)
+kpPlotMarkers(kp, data = ihs.bins.to.plot, labels = ihs.bins.to.plot$EXTREME_SCORES, r0=-0.05, r1=1, marker.parts = c(0.2, 0.1, 0.1))
+kpPlotMarkers(kp, data = ihs.genes.to.plot, labels = ihs.genes.to.plot$ensembl_gene_id, r0=-0.1, r1=-1, pos = 2, marker.parts = c(0.2, 0.1, 0.1))
+kpAddBaseNumbers(kp,cex = 1, add.units = T)
+
+############################### End of IHS approach ########################################
+
+
+############################### LD Calculations ########################################
+
+options(scipen = 999)
+
+dfr <- read.delim("orig.ld.ld.summary",sep="",header=F,check.names=F,stringsAsFactors=F)
+colnames(dfr) <- c("dist","rsq")
+
+dfr$distc <- cut(dfr$dist,breaks=seq(from=min(dfr$dist)-1,to=max(dfr$dist)+1,by=1000))
+dfr1 <- dfr %>% group_by(distc) %>% summarise(mean=mean(rsq),median=median(rsq))
+dfr1 <- dfr1 %>% mutate(start=as.integer(str_extract(str_replace_all(distc,"[\\(\\)\\[\\]]",""),"^[0-9-e+.]+")),
+                        end=as.integer(str_extract(str_replace_all(distc,"[\\(\\)\\[\\]]",""),"[0-9-e+.]+$")),
+                        mid=start+((end-start)/2))
+
+####################### Identification of the best span for loess fit function
+#https://stats.stackexchange.com/questions/2002/how-do-i-decide-what-span-to-use-in-loess-regression-in-r
+
+x <- dfr1$end[1:nrow(dfr1)-1]
+y <- dfr1$mean[1:nrow(dfr1)-1]
+
+df <- data.frame(x, y)
+
+span.seq <- seq(from = 0.15, to = 0.95, by = 0.05) #explores range of spans
+k <- 10 #number of folds
+set.seed(1) # replicate results
+folds <- sample(x = 1:k, size = length(x), replace = TRUE)
+cv.error.mtrx <- matrix(rep(x = NA, times = k * length(span.seq)), 
+                        nrow = length(span.seq), ncol = k)
+
+for(i in 1:length(span.seq)) {
+  for(j in 1:k) {
+    loess.fit <- loess(formula = y ~ x, data = df[folds != j, ], span = span.seq[i])
+    preds <- predict(object = loess.fit, newdata = df[folds == j, ])
+    cv.error.mtrx[i, j] <- mean((df$y[folds == j] - preds)^2, na.rm = TRUE)
+    # some predictions result in `NA` because of the `x` ranges in each fold
+  }
+}
+
+cv.errors <- rowMeans(cv.error.mtrx)
+best.span.i <- which.min(cv.errors)
+best.span.i
+span.seq[best.span.i]
+
+############################ Determining Inflection Points for gene Range
+#https://stats.stackexchange.com/questions/76959/finding-inflection-points-in-r-from-smoothed-data
+
+options(scipen = 999)
+plot(x,y, xlab = ("Distance (Bases)"), ylab =(expression(LD~r^2)))
+lo <- loess(y~x, span = span.seq[best.span.i])
+xl <- seq(min(x),max(x), (max(x) - min(x))/1000)
+out = predict(lo,xl)
+lines(xl, out, col='red', lwd=2)
+infl <- c(FALSE, diff(diff(out)>0)!=0)
+points(xl[infl ], out[infl ], col="blue", cex = 1)
+abline(a=.1, b=0, col = "red", lty = "dashed")
+#abline(v=xl[infl][1], a = 0, b=0)
+segments(xl[infl][1], 0.098, xl[infl][1], out[infl ][1])
+text(0, 0.09871560, labels = "2500bp")
+text(xl[infl][1], 0.09871560, labels = paste(xl[infl][1], "bp", sep = ""))
+
+############################### End of LD Calculations ########################################
+
+
+############################### Combinatorial Analysis of the three Approaches ########################################
+
+############### GO plots
+
+read.delim("GO_humans_no_correction.txt") %>% as.data.frame() %>% mutate(LogPvalue= -log10(upload_1..raw.P.value.)) -> GO_humans
+Plot_humans <- ggplot(GO_humans[1:10,], aes(x = reorder(GO.biological.process.complete, LogPvalue), y = LogPvalue)) + 
+  geom_bar(stat = "identity") + theme_classic() + theme(axis.text.x = element_text(size =  20),axis.text.y = element_text(size =  20), axis.title=element_text(size=25,face="bold")) + 
+  xlab("Top 10 Gene Ontology: Biological Processes against Human Database") + ylab("-log10(Raw Pvalue)") + ylim(c(0,4)) + coord_flip()
+
+read.delim("GO_zebrafish_no_correction.txt") %>% as.data.frame() %>% mutate(LogPvalue= -log10(upload_1..raw.P.value.)) -> GO_zebrafish
+Plot_zebrafish <- ggplot(GO_zebrafish[1:10,], aes(x = reorder(GO.biological.process.complete, LogPvalue), y = LogPvalue)) + 
+  geom_bar(stat = "identity") + theme_classic() + theme(axis.text.x = element_text(size =  20),axis.text.y = element_text(size =  20), axis.title=element_text(size=25,face="bold")) + 
+  xlab("Top 10 Gene Ontology: Biological Processes against Zebrafish Database") + ylab("-log10(Raw Pvalue)") + ylim(c(0,4)) + coord_flip()
+
+png("foo.png", height = 1000, width = 6000)
+grid.arrange(Plot_humans,Plot_zebrafish, ncol = 2)
+dev.off()
+
+############################### End of Combinatorial Analysis of the three Approaches ########################################
+
+
+
+
+
+
+
+
+ 
